@@ -17,7 +17,6 @@ import os
 import torch
 from torch import nn
 from transformers import AutoConfig, AutoModel
-from transformers.feature_extraction_utils import BatchFeature
 
 import gr00t
 
@@ -25,9 +24,7 @@ DEFAULT_EAGLE_PATH = os.path.join(
     os.path.dirname(gr00t.__file__), "model", "backbone", "eagle2_hg_model"
 )
 
-
 class EagleBackbone(nn.Module):
-
     def __init__(
         self,
         tune_llm: bool = False,
@@ -94,10 +91,10 @@ class EagleBackbone(nn.Module):
             if self.eagle_model.vision_model and not self.tune_visual:
                 self.eagle_model.vision_model.eval()
 
-    def prepare_input(self, batch: dict) -> BatchFeature:
-        return BatchFeature(data=batch)
+    def prepare_input(self, batch: dict) :
+        return dict(data=batch)
 
-    def forward_eagle(self, vl_input: BatchFeature) -> BatchFeature:
+    def forward_eagle(self, vl_input: dict) :
         eagle_prefix = "eagle_"
         eagle_input = {
             k.removeprefix(eagle_prefix): v
@@ -105,25 +102,14 @@ class EagleBackbone(nn.Module):
             if k.startswith(eagle_prefix)
         }
         del eagle_input["image_sizes"]
-        for k, v in eagle_input.items():
-            saved_path = ".tmp/vlm_outputs/eagle_" + k + ".pt"
-            saved_v = torch.load(saved_path)
-            saved_v = saved_v.to(v.device).to(v.dtype)
-            if not torch.allclose(v.cpu(), saved_v.cpu()):
-                print(v.cpu() - saved_v.cpu())
-                print(f"Warning: {k} is not close to the saved value")
-                print(f"v: {v.shape}")
-                print(f"saved_v: {saved_v.shape}")
-                breakpoint()
-            else:
-                print(f"Warning: {k} is close to the saved value")
+        breakpoint()
         eagle_output = self.eagle_model(**eagle_input, output_hidden_states=True, return_dict=True)
         eagle_features = eagle_output.hidden_states[self.select_layer]
 
         eagle_features = self.eagle_linear(eagle_features)
         return eagle_features, eagle_input["attention_mask"]
 
-    def forward(self, vl_input: BatchFeature) -> BatchFeature:
+    def forward(self, vl_input: dict) :
         self.set_frozen_modules_to_eval_mode()
 
         eagle_embeds, eagle_mask = self.forward_eagle(vl_input)
@@ -138,6 +124,29 @@ class EagleBackbone(nn.Module):
                 if param.requires_grad:
                     dummy_term = dummy_term + 0.0 * param.sum()
             eagle_embeds = eagle_embeds + dummy_term
-        return BatchFeature(
+        return dict(
             data={"backbone_features": eagle_embeds, "backbone_attention_mask": eagle_mask}
         )  # [B, T2, hidden_size]
+
+if __name__ == "__main__":
+    import glob
+    backbone_cfg = {
+        "eagle_path": "NVEagle/eagle_er-qwen3_1_7B-Siglip2_400M_stage1_5_128gpu_er_v7_1mlp_nops",
+        "load_bf16": False,
+        "project_to_dim": None,
+        "reproject_vision": False,
+        "select_layer": 12,
+        "tune_llm": False,
+        "tune_visual": False,
+        "use_flash_attention": True,
+    }
+    eagle_backbone = EagleBackbone(**backbone_cfg)
+    eagle_backbone.cuda().eval()
+    
+    # load the vlm inputs
+    vlm_inputs = {}
+    for file in glob.glob(".tmp/vlm_outputs/*.pt"):
+        key = file.split("/")[-1].split(".")[0]
+        vlm_inputs[key] = torch.load(file)
+    
+    backbone_outputs = eagle_backbone.forward(vlm_inputs)
